@@ -1,0 +1,4 @@
+.venv/
+
+# ignore env auto activation script for direnv
+.envrc
