@@ -1,4 +1,9 @@
-from .calibration import load_calibration, save_calibration
+from .calibration import (
+    compute_reprojection_error,
+    estimate_camera_pose,
+    load_calibration,
+    save_calibration,
+)
 from .rays import (
     Ray3D,
     RayObservation,
@@ -26,6 +31,8 @@ __all__ = [
     "CameraPose",
     "CourtCoordinateSystem",
     "CourtDimensions",
+    "estimate_camera_pose",
+    "compute_reprojection_error",
     # calibration
     "load_calibration",
     "save_calibration",
