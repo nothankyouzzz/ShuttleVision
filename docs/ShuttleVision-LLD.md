@@ -626,7 +626,7 @@ def run_detection_and_tracking(
 
 ### 3.1 职责
 
-- 使用模块 1 的相机标定结果，将像素点 `(u, v)` 转换为世界坐标系下的三维射线。
+- 使用模块 1 的相机标定结果，将像素点 $u, v$ 转换为世界坐标系下的三维射线。
 - 将模块 2 的轨迹 `Track2D` 转换为 `RayObservation` 序列，为后续 3D 轨迹拟合做准备。
 
 ### 3.2 数据结构
@@ -804,4 +804,3 @@ def convert_track_to_rays(track: Track2D, pose: CameraPose) -> list[RayObservati
 - 与模块 1 联动测试：
   - 取一个世界坐标系下已知点，使用相机位姿投影到像素；
   - 再用 `pixel_to_world_ray` + 与某个已知平面求交，检查反推位置误差。
-
