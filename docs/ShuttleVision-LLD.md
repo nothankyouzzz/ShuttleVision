@@ -270,25 +270,24 @@ def frames(self) -> Iterator[DecodedFrame]:
 
 ```python
 from dataclasses import dataclass
+from jaxtyping import Float
 import numpy as np
-
-Array1F = np.ndarray
-Array2F = np.ndarray
 
 @dataclass(slots=True)
 class CourtDimensions:
     length_m: float
     width_m: float
     net_height_m: float
-    # 后续可添加单打/双打不同线等信息
+    # 可扩展单双打线、发球线等特定尺寸
 
 @dataclass(slots=True)
 class CourtCoordinateSystem:
-    """球场坐标系约定：
-    - 原点：本方左后场角（面向球网时左手边，底线与边线交点）
-    - x 轴：沿底线指向对面底线方向（正向指向对面）
-    - y 轴：沿左到右
-    - z 轴：垂直向上
+    """
+    Court coordinate convention:
+    - Origin: rear-left corner (facing the net, on the near baseline)
+    - x-axis: along court length pointing to the opponent
+    - y-axis: along court width from left to right
+    - z-axis: up
     """
     origin_description: str = "rear-left corner"
     axes_description: str = "x: length, y: width, z: up"
@@ -308,31 +307,37 @@ class CameraIntrinsics:
 
 @dataclass(slots=True)
 class CameraPose:
-    """世界坐标系即球场坐标系"""
-    R_wc: Array2F  # shape=(3, 3)，world->camera 旋转
-    t_wc_m: Array1F  # shape=(3,)，world->camera 平移，单位: 米
+    """World frame is aligned with the court frame."""
+    R_wc: Float[np.ndarray, "3 3"]  # world->camera rotation
+    t_wc_m: Float[np.ndarray, "3"]  # world->camera translation (meters)
     intrinsics: CameraIntrinsics
 
 @dataclass(slots=True)
 class CalibrationInput:
-    """来自标定工具的输入数据。"""
+    """PnP inputs from calibration tool."""
     image_width_px: int
     image_height_px: int
-    points_image_px: Array2F  # shape=(N, 2)
-    points_world_m: Array2F   # shape=(N, 3)
+    points_image_px: Float[np.ndarray, "N 2"]
+    points_world_m: Float[np.ndarray, "N 3"]
 
 @dataclass(slots=True)
 class CalibrationResult:
     camera_pose: CameraPose
     reprojection_error_px: float
     num_points: int
-```
 
-异常类型：
-
-```python
 class CalibrationError(RuntimeError):
     pass
+
+class GeometryError(RuntimeError):
+    pass
+
+@dataclass(slots=True)
+class CalibrationConfig:
+    """Thresholds/parameters governing the calibration pipeline."""
+    ransac_reprojection_error_px: float = 8.0
+    ransac_confidence: float = 0.99
+    reprojection_error_threshold_px: float = 4.0
 ```
 
 ### 1.3 公共接口
@@ -341,6 +346,7 @@ class CalibrationError(RuntimeError):
 
 ```python
 from .types import (
+    CalibrationConfig,
     CalibrationInput,
     CalibrationResult,
     CameraIntrinsics,
@@ -351,8 +357,9 @@ from .types import (
 def estimate_camera_pose(
     calib_input: CalibrationInput,
     initial_intrinsics: CameraIntrinsics | None = None,
+    config: CalibrationConfig | None = None,
 ) -> CalibrationResult:
-    """基于 PnP 估计相机位姿与（可选）内参。"""
+    """基于 PnP 估计相机位姿与（可选）内参，阈值由 CalibrationConfig 控制。"""
     ...
 
 
@@ -374,6 +381,39 @@ def load_calibration(path: str) -> CalibrationResult:
     ...
 ```
 
+文件：`shuttlevision/geometry/camera.py`
+
+```python
+from dataclasses import dataclass
+import numpy as np
+from jaxtyping import Float
+
+from .types import CameraPose, CameraIntrinsics, GeometryError
+
+
+@dataclass(slots=True)
+class CameraModel:
+    """Pinhole 相机模型，统一所有坐标系变换/投影逻辑。"""
+
+    pose: CameraPose
+
+    @property
+    def intrinsics(self) -> CameraIntrinsics: ...
+
+    @property
+    def camera_center_m(self) -> Float[np.ndarray, "3"]: ...
+
+    def pixel_to_camera_ray(self, u_px: float, v_px: float) -> Float[np.ndarray, "3"]: ...
+
+    def pixel_to_world_direction(self, u_px: float, v_px: float) -> Float[np.ndarray, "3"]: ...
+
+    def world_to_camera(self, points_world_m) -> Float[np.ndarray, "N 3"]: ...
+
+    def camera_to_world(self, points_cam_m) -> Float[np.ndarray, "N 3"]: ...
+
+    def project_world_points(self, points_world_m) -> Float[np.ndarray, "N 2"]: ...
+```
+
 ### 1.4 算法与内部流程
 
 - 使用 OpenCV `solvePnP`：
@@ -387,7 +427,7 @@ def load_calibration(path: str) -> CalibrationResult:
 - 使用 `compute_reprojection_error`：
   - 将 3D 点经 R, t, K 投影到像素平面；
   - 计算与原始标注的 L2 距离平均值（px）。
-- 若误差超过阈值（例如 2.0 px），抛出 `CalibrationError` 或记录 warning 视配置而定。
+- 所有 RANSAC/重投影阈值由 `CalibrationConfig` 提供，可在 CLI/配置文件中覆盖默认值。
 
 ### 1.5 错误处理与日志
 
@@ -635,16 +675,20 @@ def run_detection_and_tracking(
 
 ```python
 from dataclasses import dataclass
-import numpy as np
-from .types import CameraIntrinsics, CameraPose
-from shuttlevision.tracking import Track2D, TrackPoint2D
 
-Array1F = np.ndarray
+import numpy as np
+from jaxtyping import Float
+
+from shuttlevision.tracking import Track2D, TrackPoint2D
+from .camera import CameraModel
+from .types import CameraIntrinsics, CameraPose, GeometryError
+
 
 @dataclass(slots=True)
 class Ray3D:
-    origin_m: Array1F  # shape=(3,)
-    direction: Array1F  # shape=(3,), 已归一化
+    origin_m: Float[np.ndarray, "3"]
+    direction: Float[np.ndarray, "3"]  # unit vector in world frame
+
 
 @dataclass(slots=True)
 class RayObservation:
@@ -655,16 +699,10 @@ class RayObservation:
     score: float
 ```
 
-异常类型（示意）：
-
-```python
-class GeometryError(RuntimeError):
-    pass
-```
-
 ### 3.3 公共接口
 
 ```python
+from .camera import CameraModel
 from .types import CameraIntrinsics, CameraPose
 
 
@@ -672,16 +710,16 @@ def pixel_to_camera_ray(
     u_px: float,
     v_px: float,
     intrinsics: CameraIntrinsics,
-) -> Array1F:
+) -> Float[np.ndarray, "3"]:
     """将像素坐标变换到相机坐标系中的单位方向向量。"""
     ...
 
 
 def camera_to_world_ray(
-    ray_cam: Array1F,
+    ray_cam: Float[np.ndarray, "3"],
     camera_pose: CameraPose,
 ) -> Ray3D:
-    """将相机坐标系下的射线转换到世界坐标系。"""
+    """将相机坐标系下的射线转换到世界坐标系（起点为相机光心）。"""
     ...
 
 
@@ -689,16 +727,18 @@ def pixel_to_world_ray(
     u_px: float,
     v_px: float,
     camera_pose: CameraPose,
+    camera_model: CameraModel | None = None,
 ) -> Ray3D:
-    """组合 pixel_to_camera_ray + camera_to_world_ray。"""
+    """直接调用 `CameraModel`，可复用已有实例以避免重复构造。"""
     ...
 
 
 def convert_track_to_rays(
     track: Track2D,
     camera_pose: CameraPose,
+    camera_model: CameraModel | None = None,
 ) -> list[RayObservation]:
-    """将单条 2D 轨迹转为 RayObservation 序列。"""
+    """将单条 2D 轨迹转为 RayObservation 序列，可复用 CameraModel。"""
     ...
 
 
@@ -706,7 +746,7 @@ def convert_tracks_to_rays(
     tracks: list[Track2D],
     camera_pose: CameraPose,
 ) -> list[RayObservation]:
-    """批量转换所有轨迹。"""
+    """批量转换所有轨迹；内部复用同一个 CameraModel。"""
     rays: list[RayObservation] = []
     for t in tracks:
         rays.extend(convert_track_to_rays(t, camera_pose))
@@ -715,78 +755,11 @@ def convert_tracks_to_rays(
 
 ### 3.4 算法细节
 
-`pixel_to_camera_ray`：
+核心逻辑：
 
-```python
-import numpy as np
-
-
-def pixel_to_camera_ray(u_px: float, v_px: float, K: CameraIntrinsics) -> Array1F:
-    if K.fx_px == 0 or K.fy_px == 0:
-        raise GeometryError("Invalid intrinsics: fx or fy is zero")
-
-    # 归一化坐标
-    x_n = (u_px - K.cx_px) / K.fx_px
-    y_n = (v_px - K.cy_px) / K.fy_px
-
-    v_cam = np.array([x_n, y_n, 1.0], dtype=float)
-    norm = np.linalg.norm(v_cam)
-    if norm < 1e-9:
-        raise GeometryError("Degenerate ray direction")
-
-    return v_cam / norm
-```
-
-`camera_to_world_ray`：
-
-```python
-
-def camera_to_world_ray(ray_cam: Array1F, pose: CameraPose) -> Ray3D:
-    R_wc = pose.R_wc
-    t_wc_m = pose.t_wc_m
-
-    # R_wc: world->camera，因此 R_cw = R_wc^T
-    R_cw = R_wc.T
-
-    direction_world = R_cw @ ray_cam
-    direction_world /= np.linalg.norm(direction_world)
-
-    # 相机光心在世界坐标系下的位置：
-    # x_cam = R_wc * x_world + t_wc
-    # 令 x_cam = 0 => x_world = -R_cw * t_wc
-    origin_m = -R_cw @ t_wc_m
-
-    return Ray3D(origin_m=origin_m, direction=direction_world)
-```
-
-`pixel_to_world_ray`：
-
-```python
-
-def pixel_to_world_ray(u_px: float, v_px: float, pose: CameraPose) -> Ray3D:
-    ray_cam = pixel_to_camera_ray(u_px, v_px, pose.intrinsics)
-    return camera_to_world_ray(ray_cam, pose)
-```
-
-`convert_track_to_rays`：
-
-```python
-
-def convert_track_to_rays(track: Track2D, pose: CameraPose) -> list[RayObservation]:
-    obs: list[RayObservation] = []
-    for idx, p in enumerate(track.points):
-        ray = pixel_to_world_ray(p.u_px, p.v_px, pose)
-        obs.append(
-            RayObservation(
-                track_id=track.track_id,
-                frame_index=idx,  # 或实际 frame_index，视 TrackPoint2D 是否携带
-                timestamp_s=p.timestamp_s,
-                ray=ray,
-                score=p.score,
-            )
-        )
-    return obs
-```
+- `pixel_to_camera_ray` 仍然执行像素归一化并返回相机坐标系单位向量；内部抛 `GeometryError` 以应对退化内参。
+- `CameraModel` 负责 `camera_to_world_ray` 所需的 `R_cw` 与相机光心计算，避免重复矩阵推导。
+- `pixel_to_world_ray` / `convert_track*_rays` 会复用传入/内部构造的 `CameraModel`，减少重复对象创建；当 `TrackPoint2D` 未来补充 `frame_index` 字段时可直接使用，当前通过 `_resolve_frame_index` 兼容。
 
 ### 3.5 错误处理与日志
 
@@ -801,6 +774,7 @@ def convert_track_to_rays(track: Track2D, pose: CameraPose) -> list[RayObservati
 - 简单相机：相机位于原点、朝 z 轴、K 为单位阵：
   - 像素中心 (0, 0) 应映射到 (0, 0, 1) 方向；
   - 四角像素应对应合理方向。
+- `CameraModel` round-trip 测试：`world_to_camera` + `camera_to_world` 应恢复原始点。
 - 与模块 1 联动测试：
   - 取一个世界坐标系下已知点，使用相机位姿投影到像素；
   - 再用 `pixel_to_world_ray` + 与某个已知平面求交，检查反推位置误差。
