@@ -1,3 +1,4 @@
+from .camera import CameraModel
 from .calibration import (
     compute_reprojection_error,
     estimate_camera_pose,
@@ -11,8 +12,10 @@ from .rays import (
     camera_to_world_ray,
     pixel_to_world_ray,
     convert_track_to_rays,
+    convert_tracks_to_rays,
 )
 from .types import (
+    CalibrationConfig,
     CalibrationError,
     CalibrationInput,
     CalibrationResult,
@@ -20,17 +23,21 @@ from .types import (
     CameraPose,
     CourtCoordinateSystem,
     CourtDimensions,
+    GeometryError,
 )
 
 __all__ = [
     # types
     "CalibrationInput",
     "CalibrationResult",
+    "CalibrationConfig",
     "CalibrationError",
     "CameraIntrinsics",
     "CameraPose",
     "CourtCoordinateSystem",
     "CourtDimensions",
+    "GeometryError",
+    "CameraModel",
     "estimate_camera_pose",
     "compute_reprojection_error",
     # calibration
@@ -43,4 +50,5 @@ __all__ = [
     "camera_to_world_ray",
     "pixel_to_world_ray",
     "convert_track_to_rays",
+    "convert_tracks_to_rays",
 ]
