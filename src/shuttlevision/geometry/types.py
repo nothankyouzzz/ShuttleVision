@@ -1,9 +1,6 @@
 from dataclasses import dataclass
-
+from jaxtyping import Float
 import numpy as np
-
-Array1F = np.ndarray
-Array2F = np.ndarray
 
 
 @dataclass(slots=True)
@@ -11,17 +8,17 @@ class CourtDimensions:
     length_m: float
     width_m: float
     net_height_m: float
-    # 以后可加单/双打不同线的尺寸
+    # Room to extend for single/doubles specific line offsets.
 
 
 @dataclass(slots=True)
 class CourtCoordinateSystem:
     """
-    定义球场坐标系的约定：
-    - 原点：左后场角（面对球网时左手边、后端线与边线交点）
-    - x 轴：沿底线到对面底线方向（正向指向对面）
-    - y 轴：沿左到右方向
-    - z 轴：竖直向上
+    Court coordinate convention:
+    - Origin: rear-left corner (facing the net, left hand side on the near baseline)
+    - x-axis: along court length pointing to the opponent side
+    - y-axis: along court width from left to right
+    - z-axis: up
     """
 
     origin_description: str = "rear-left corner"
@@ -35,7 +32,7 @@ class CameraIntrinsics:
     cx_px: float
     cy_px: float
     skew: float = 0.0
-    # 畸变先预留
+    # Distortion coefficients are optional placeholders.
     k1: float | None = None
     k2: float | None = None
     p1: float | None = None
@@ -45,26 +42,21 @@ class CameraIntrinsics:
 
 @dataclass(slots=True)
 class CameraPose:
-    """
-    世界坐标系 = 球场坐标系
-    """
+    """World coordinate system is aligned with the court frame."""
 
-    R_wc: Array2F  # shape=(3, 3)，world->camera 旋转
-    t_wc_m: Array1F  # shape=(3,)，world->camera 平移（单位：米）
+    R_wc: Float[np.ndarray, "3 3"]  # world->camera rotation
+    t_wc_m: Float[np.ndarray, "3"]  # world->camera translation in meters
     intrinsics: CameraIntrinsics
 
 
 @dataclass(slots=True)
 class CalibrationInput:
-    """
-    来自标定工具的输入。
-    """
+    """Inputs produced by the calibration tool."""
 
     image_width_px: int
     image_height_px: int
-    # 像素点：球场四角、网柱点等
-    points_image_px: Array2F  # shape=(N, 2)
-    points_world_m: Array2F  # shape=(N, 3)
+    points_image_px: Float[np.ndarray, "N 2"]
+    points_world_m: Float[np.ndarray, "N 3"]
 
 
 @dataclass(slots=True)
@@ -76,3 +68,18 @@ class CalibrationResult:
 
 class CalibrationError(RuntimeError):
     pass
+
+
+class GeometryError(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
+class CalibrationConfig:
+    """
+    Tunable thresholds and parameters for camera calibration.
+    """
+
+    ransac_reprojection_error_px: float = 8.0
+    ransac_confidence: float = 0.99
+    reprojection_error_threshold_px: float = 4.0

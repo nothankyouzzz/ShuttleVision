@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from .types import (
+    CalibrationConfig,
     CalibrationError,
     CalibrationInput,
     CalibrationResult,
@@ -54,6 +55,7 @@ def _default_intrinsics(calib_input: CalibrationInput) -> CameraIntrinsics:
 def estimate_camera_pose(
     calib_input: CalibrationInput,
     initial_intrinsics: CameraIntrinsics | None = None,
+    config: CalibrationConfig | None = None,
 ) -> CalibrationResult:
     """
     Solve camera pose via PnP:
@@ -61,6 +63,7 @@ def estimate_camera_pose(
     - Otherwise use a resolution-based pinhole guess as initial intrinsics
     - Start with RANSAC for a robust seed, then refine iteratively
     """
+    cfg = config or CalibrationConfig()
     pts_img = np.asarray(calib_input.points_image_px, dtype=float)
     pts_world = np.asarray(calib_input.points_world_m, dtype=float)
 
@@ -83,8 +86,8 @@ def estimate_camera_pose(
             image_points,
             camera_matrix,
             dist_coeffs,
-            reprojectionError=8.0,
-            confidence=0.99,
+            reprojectionError=cfg.ransac_reprojection_error_px,
+            confidence=cfg.ransac_confidence,
             flags=cv2.SOLVEPNP_AP3P,
         )
     except (
@@ -115,9 +118,7 @@ def estimate_camera_pose(
             useExtrinsicGuess=True,
             flags=cv2.SOLVEPNP_ITERATIVE,
         )
-    except (
-        cv2.error
-    ) as exc:  # pragma: no cover
+    except cv2.error as exc:  # pragma: no cover
         raise CalibrationError(f"solvePnP refine failed: {exc}") from exc
 
     if not success_refine:
@@ -129,9 +130,12 @@ def estimate_camera_pose(
     camera_pose = CameraPose(R_wc=R_wc, t_wc_m=t_wc_m, intrinsics=intrinsics)
     reproj_err = compute_reprojection_error(calib_input, camera_pose)
 
-    if reproj_err > 4.0:
+    if reproj_err > cfg.reprojection_error_threshold_px:
         raise CalibrationError(
-            f"Reprojection error too large: {reproj_err:.3f}px (threshold=4px)"
+            (
+                "Reprojection error too large: "
+                f"{reproj_err:.3f}px (threshold={cfg.reprojection_error_threshold_px}px)"
+            )
         )
 
     logger.debug(
@@ -201,7 +205,7 @@ def save_calibration(result: CalibrationResult, path: str) -> None:
 
 
 def load_calibration(path: str) -> CalibrationResult:
-    """从 JSON 读取标定结果。"""
+    """Load calibration result from JSON."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     intr_data = data["intrinsics"]
     intrinsics = CameraIntrinsics(

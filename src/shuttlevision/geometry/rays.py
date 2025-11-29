@@ -1,26 +1,25 @@
 from dataclasses import dataclass
 
 import numpy as np
+from jaxtyping import Float
 
-from shuttlevision.tracking import Track2D
+from shuttlevision.tracking import Track2D, TrackPoint2D
 
-from .types import CameraIntrinsics, CameraPose
+from .camera import CameraModel
+from .types import CameraIntrinsics, CameraPose, GeometryError
 
-Array1F = np.ndarray
-Array2F = np.ndarray
+_EPS = 1e-9
 
 
 @dataclass(slots=True)
 class Ray3D:
-    origin_m: Array1F  # shape=(3,)
-    direction: Array1F  # shape=(3,), 归一化
+    origin_m: Float[np.ndarray, "3"]  # camera optical center in world frame
+    direction: Float[np.ndarray, "3"]  # unit vector in world frame
 
 
 @dataclass(slots=True)
 class RayObservation:
-    """
-    将 TrackPoint2D 与几何信息联系起来。
-    """
+    """Link a 2D track point with its corresponding 3D ray."""
 
     track_id: int
     frame_index: int
@@ -33,66 +32,72 @@ def pixel_to_camera_ray(
     u_px: float,
     v_px: float,
     K: CameraIntrinsics,
-) -> Array1F:
-    """
-    将像素坐标变换到相机坐标系中的单位方向向量。
-    """
-    # 去中心化
+) -> Float[np.ndarray, "3"]:
+    """Transform pixel coordinate into a unit direction in the camera frame."""
+    if K.fx_px == 0 or K.fy_px == 0:
+        raise GeometryError("Invalid intrinsics: fx or fy is zero")
+
     x_n = (u_px - K.cx_px) / K.fx_px
     y_n = (v_px - K.cy_px) / K.fy_px
-    # 在相机坐标系中，z = 1 平面上的一点
     v_cam = np.array([x_n, y_n, 1.0], dtype=float)
-    # 归一化
-    v_cam /= np.linalg.norm(v_cam)
-    return v_cam
+    norm = float(np.linalg.norm(v_cam))
+    if norm < _EPS:
+        raise GeometryError("Degenerate ray direction")
+
+    return v_cam / norm
 
 
 def camera_to_world_ray(
-    ray_cam: Array1F,
+    ray_cam: Float[np.ndarray, "3"],
     pose: CameraPose,
 ) -> Ray3D:
-    """
-    将相机坐标系下的射线方向转换到世界坐标系，并设置 origin 为相机光心。
-    """
-    # R_wc: world->camera, 所以 R_cw = R_wc^T
-    R_cw = pose.R_wc.T
-    direction_world = R_cw @ ray_cam
-    direction_world /= np.linalg.norm(direction_world)
+    """Convert camera-frame ray to world-frame ray, origin at camera center."""
+    camera = CameraModel(pose)
+    direction_world = camera.R_cw @ ray_cam
+    dir_norm = float(np.linalg.norm(direction_world))
+    if dir_norm < _EPS:
+        raise GeometryError("Degenerate world ray direction")
 
-    # 相机光心在世界坐标系下的位置：
-    # x_cam = R_wc * x_world + t_wc
-    # 令 x_cam = 0 => x_world = -R_cw * t_wc
-    origin_m = -R_cw @ pose.t_wc_m
-
-    return Ray3D(origin_m=origin_m, direction=direction_world)
+    origin_m = camera.camera_center_m
+    return Ray3D(origin_m=origin_m, direction=direction_world / dir_norm)
 
 
 def pixel_to_world_ray(
     u_px: float,
     v_px: float,
     pose: CameraPose,
+    camera_model: CameraModel | None = None,
 ) -> Ray3D:
-    """
-    组合 pixel_to_camera_ray + camera_to_world_ray。
-    """
-    ray_cam = pixel_to_camera_ray(u_px, v_px, pose.intrinsics)
-    return camera_to_world_ray(ray_cam, pose)
+    """Convenience wrapper combining pixel_to_camera_ray and camera_to_world_ray."""
+    camera = camera_model or CameraModel(pose)
+    ray_cam = camera.pixel_to_camera_ray(u_px, v_px)
+    direction_world = camera.pixel_to_world_direction(u_px, v_px)
+    return Ray3D(origin_m=camera.camera_center_m, direction=direction_world)
+
+
+def _resolve_frame_index(idx: int, point: TrackPoint2D) -> int:
+    """Backward-compatible shim for future TrackPoint2D.frame_index."""
+    if hasattr(point, "frame_index"):
+        frame_val = getattr(point, "frame_index")
+        if isinstance(frame_val, int):
+            return frame_val
+    return idx
 
 
 def convert_track_to_rays(
     track: Track2D,
     pose: CameraPose,
+    camera_model: CameraModel | None = None,
 ) -> list[RayObservation]:
-    """
-    将单条 2D 轨迹转为 RayObservation 序列。
-    """
+    """Convert one 2D track into a sequence of RayObservation."""
     obs: list[RayObservation] = []
+    camera = camera_model or CameraModel(pose)
     for idx, p in enumerate(track.points):
-        ray = pixel_to_world_ray(p.u_px, p.v_px, pose)
+        ray = pixel_to_world_ray(p.u_px, p.v_px, pose, camera_model=camera)
         obs.append(
             RayObservation(
                 track_id=track.track_id,
-                frame_index=idx,  # 或实际 frame_index，视 TrackPoint2D 是否携带
+                frame_index=_resolve_frame_index(idx, p),
                 timestamp_s=p.timestamp_s,
                 ray=ray,
                 score=p.score,
@@ -105,8 +110,9 @@ def convert_tracks_to_rays(
     tracks: list[Track2D],
     camera_pose: CameraPose,
 ) -> list[RayObservation]:
-    """批量转换所有轨迹。"""
+    """Batch convert all tracks to RayObservation."""
     rays: list[RayObservation] = []
+    camera = CameraModel(camera_pose)
     for t in tracks:
-        rays.extend(convert_track_to_rays(t, camera_pose))
+        rays.extend(convert_track_to_rays(t, camera_pose, camera_model=camera))
     return rays
