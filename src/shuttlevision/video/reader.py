@@ -152,6 +152,11 @@ class VideoReader:
         - time window cropping
         - fps downsampling
         - resolution scaling
+
+        Note: each call returns a new iterator that shares this reader's backend.
+        Creating multiple iterators concurrently or sequentially will continue
+        from the current decode position rather than rewinding; open a fresh
+        VideoReader to start over.
         """
         if self._backend is None or self._metadata is None:
             raise VideoIOError("Video not opened")

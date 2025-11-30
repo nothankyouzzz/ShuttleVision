@@ -8,6 +8,11 @@ Array3U8 = UInt8[np.ndarray, "height width 3"]  # RGB frame
 
 @dataclass(slots=True)
 class VideoIOConfig:
+    """Options for video decoding.
+
+    Time windowing uses a half-open interval [start_time_s, end_time_s): frames at
+    start_time_s are included, frames at end_time_s are excluded.
+    """
     target_width_px: int | None = None
     target_height_px: int | None = None
     target_fps: float | None = None
