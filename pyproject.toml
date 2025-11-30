@@ -10,5 +10,8 @@ dependencies = [
     "opencv-python>=4.12.0.88",
 ]
 
+# here we disabled forward-annotation-syntax-error (F722) because
+# jaxtyping uses postponed evaluation of annotations which causes
+# ruff to raise F722 errors.
 [tool.ruff]
 ignore = ["F722"]

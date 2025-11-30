@@ -1,4 +1,12 @@
+# ignore python virtual environment directories
 .venv/
 
 # ignore env auto activation script for direnv
 .envrc
+
+# ignore IDE specific files
+.vscode/
+.idea/
+
+# ignore python cache files
+__pycache__/
