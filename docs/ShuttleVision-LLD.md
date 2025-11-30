@@ -52,7 +52,7 @@
   from shuttlevision.video import VideoMetadata, DecodedFrame
   ```
 
-## 模块 0：视频解码与预处理（Video I/O）：视频解码与预处理（Video I/O）
+## 模块 0：视频解码与预处理 (Video I/O)
 
 ### 0.1 职责
 
@@ -66,21 +66,41 @@
 
 ```python
 from dataclasses import dataclass
-from typing import Tuple
-import numpy as np
+from os import PathLike
 
-Array3U8 = np.ndarray  # shape=(H, W, 3), dtype=uint8
+import numpy as np
+from jaxtyping import UInt8
+
+PathLikeStr = str | PathLike[str]
+Array3U8 = UInt8[np.ndarray, "height width 3"]  # RGB 图像帧，shape=(H, W, 3)
+
 
 @dataclass(slots=True)
 class VideoIOConfig:
+    """视频解码配置，用于控制下采样与裁剪。"""
+
     target_width_px: int | None = None
     target_height_px: int | None = None
     target_fps: float | None = None
     start_time_s: float | None = None
     end_time_s: float | None = None
 
+    def validate(self) -> None:
+        """对配置进行基本合法性检查。"""
+        if self.target_fps is not None and self.target_fps <= 0:
+            raise VideoIOError("target_fps must be positive")
+        if (
+            self.start_time_s is not None
+            and self.end_time_s is not None
+            and self.start_time_s >= self.end_time_s
+        ):
+            raise VideoIOError("start_time_s must be earlier than end_time_s")
+
+
 @dataclass(slots=True)
 class VideoMetadata:
+    """视频元数据（只读信息，便于上游模块使用）。"""
+
     path: str
     width_px: int
     height_px: int
@@ -90,11 +110,14 @@ class VideoMetadata:
     codec: str | None = None
 
     @property
-    def resolution(self) -> Tuple[int, int]:
+    def resolution(self) -> tuple[int, int]:
         return self.width_px, self.height_px
+
 
 @dataclass(slots=True)
 class DecodedFrame:
+    """解码后的一帧图像，包含索引、时间戳与 RGB 图像数据。"""
+
     frame_index: int
     timestamp_s: float
     image: Array3U8
@@ -109,25 +132,112 @@ class VideoIOError(RuntimeError):
 
 ### 0.3 公共接口
 
+模块 0 对外公共 API 由两层组成：
+
+1. 解码后端接口：`shuttlevision/video/backend.py`，用于屏蔽 OpenCV / PyAV 等差异；
+2. 高层读取器与便捷函数：`shuttlevision/video/reader.py`。
+
+#### 0.3.1 解码后端接口（backend）
+
+文件：`shuttlevision/video/backend.py`
+
+```python
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Optional, Tuple
+
+import cv2
+import numpy as np
+
+from .types import Array3U8, PathLikeStr, VideoIOError, VideoMetadata
+
+
+class VideoBackend(ABC):
+    """视频解码后端接口，用于屏蔽具体库实现差异。"""
+
+    def __init__(self, path: PathLikeStr):
+        self._path = Path(path)
+
+    @abstractmethod
+    def open(self) -> VideoMetadata:
+        """打开视频并返回基本元数据。"""
+
+    @abstractmethod
+    def read(self) -> Tuple[bool, Array3U8]:
+        """返回 (ok, frame_bgr)，ok=False 表示视频结束。"""
+
+    @abstractmethod
+    def close(self) -> None:
+        """释放底层解码资源。"""
+
+
+class OpenCVBackend(VideoBackend):
+    """基于 OpenCV VideoCapture 的视频解码实现。"""
+
+    def __init__(self, path: PathLikeStr):
+        super().__init__(path)
+        self._cap: Optional[cv2.VideoCapture] = None
+        self._metadata: Optional[VideoMetadata] = None
+
+    def open(self) -> VideoMetadata:
+        """打开视频并构造 VideoMetadata。"""
+        ...
+
+    def read(self) -> Tuple[bool, Array3U8]:
+        """从底层解码器读取一帧 BGR 图像。"""
+        ...
+
+    def close(self) -> None:
+        """释放 OpenCV 句柄并清理内部状态。"""
+        ...
+```
+
+#### 0.3.2 高层读取器（reader）
+
 文件：`shuttlevision/video/reader.py`
 
 ```python
-from collections.abc import Iterator
-from .types import VideoIOConfig, VideoMetadata, DecodedFrame
+import logging
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+
+from .backend import OpenCVBackend, VideoBackend
+from .types import PathLikeStr, VideoIOConfig, VideoIOError, VideoMetadata, DecodedFrame
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _DecodeContext:
+    """解码过程中的内部状态（仅用于实现）。"""
+
+    raw_fps: float
+    time_per_frame_s: float
+    next_raw_index: int = 0
+    next_output_index: int = 0
+    last_output_time_s: float | None = None
+
 
 class VideoReader:
-    """
-    负责打开视频并按配置解码成标准帧序列。
-    """
+    """负责打开视频并按配置解码成标准帧序列。"""
 
-    def __init__(self, path: str, config: VideoIOConfig | None = None):
-        self._path = path
-        self._config = config or VideoIOConfig()
+    def __init__(
+        self,
+        path: PathLikeStr,
+        config: VideoIOConfig | None = None,
+        backend_factory: Callable[[PathLikeStr], VideoBackend] | None = None,
+    ):
+        self._path: PathLikeStr = path
+        self._config: VideoIOConfig = config or VideoIOConfig()
         self._metadata: VideoMetadata | None = None
-        self._cap = None  # 底层解码器句柄（例如 OpenCV VideoCapture）
+        self._backend_factory: Callable[[PathLikeStr], VideoBackend] = (
+            backend_factory or OpenCVBackend
+        )
+        self._backend: VideoBackend | None = None
 
     def open(self) -> None:
-        """打开视频源，读取基本元数据，初始化解码器。"""
+        """打开视频源，读取基本元数据，初始化解码后端。"""
         ...
 
     @property
@@ -140,10 +250,10 @@ class VideoReader:
     def frames(self) -> Iterator[DecodedFrame]:
         """
         以生成器方式逐帧输出 DecodedFrame。
-        应处理：
-        - 时间裁剪
-        - fps 下采样
-        - 分辨率缩放
+        需要处理：
+        - 时间裁剪（start_time_s / end_time_s）
+        - fps 下采样（target_fps）
+        - 分辨率缩放（target_width_px / target_height_px）
         """
         ...
 
@@ -169,7 +279,7 @@ def iter_decoded_frames(
     path: str,
     config: VideoIOConfig | None = None,
 ) -> tuple[VideoMetadata, Iterator[DecodedFrame]]:
-    """以上下文管理器的方式提供 (metadata, frames)。
+    """以上下文管理器的方式提供 (metadata, frames)，并自动释放资源。
 
     用法示例：
 
