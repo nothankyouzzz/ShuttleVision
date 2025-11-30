@@ -66,12 +66,10 @@
 
 ```python
 from dataclasses import dataclass
-from os import PathLike
 
 import numpy as np
 from jaxtyping import UInt8
 
-PathLikeStr = str | PathLike[str]
 Array3U8 = UInt8[np.ndarray, "height width 3"]  # RGB 图像帧，shape=(H, W, 3)
 
 
@@ -144,18 +142,16 @@ class VideoIOError(RuntimeError):
 ```python
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, Tuple
 
 import cv2
-import numpy as np
 
-from .types import Array3U8, PathLikeStr, VideoIOError, VideoMetadata
+from .types import Array3U8, VideoIOError, VideoMetadata
 
 
 class VideoBackend(ABC):
     """视频解码后端接口，用于屏蔽具体库实现差异。"""
 
-    def __init__(self, path: PathLikeStr):
+    def __init__(self, path: str):
         self._path = Path(path)
 
     @abstractmethod
@@ -163,7 +159,7 @@ class VideoBackend(ABC):
         """打开视频并返回基本元数据。"""
 
     @abstractmethod
-    def read(self) -> Tuple[bool, Array3U8]:
+    def read(self) -> tuple[bool, Array3U8 | None]:
         """返回 (ok, frame_bgr)，ok=False 表示视频结束。"""
 
     @abstractmethod
@@ -174,16 +170,16 @@ class VideoBackend(ABC):
 class OpenCVBackend(VideoBackend):
     """基于 OpenCV VideoCapture 的视频解码实现。"""
 
-    def __init__(self, path: PathLikeStr):
+    def __init__(self, path: str):
         super().__init__(path)
-        self._cap: Optional[cv2.VideoCapture] = None
-        self._metadata: Optional[VideoMetadata] = None
+        self._cap: cv2.VideoCapture | None = None
+        self._metadata: VideoMetadata | None = None
 
     def open(self) -> VideoMetadata:
         """打开视频并构造 VideoMetadata。"""
         ...
 
-    def read(self) -> Tuple[bool, Array3U8]:
+    def read(self) -> tuple[bool, Array3U8 | None]:
         """从底层解码器读取一帧 BGR 图像。"""
         ...
 
@@ -203,7 +199,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from .backend import OpenCVBackend, VideoBackend
-from .types import PathLikeStr, VideoIOConfig, VideoIOError, VideoMetadata, DecodedFrame
+from .types import VideoIOConfig, VideoIOError, VideoMetadata, DecodedFrame
 
 logger = logging.getLogger(__name__)
 
@@ -224,14 +220,14 @@ class VideoReader:
 
     def __init__(
         self,
-        path: PathLikeStr,
+        path: str,
         config: VideoIOConfig | None = None,
-        backend_factory: Callable[[PathLikeStr], VideoBackend] | None = None,
+        backend_factory: Callable[[str], VideoBackend] | None = None,
     ):
-        self._path: PathLikeStr = path
+        self._path: str = path
         self._config: VideoIOConfig = config or VideoIOConfig()
         self._metadata: VideoMetadata | None = None
-        self._backend_factory: Callable[[PathLikeStr], VideoBackend] = (
+        self._backend_factory: Callable[[str], VideoBackend] = (
             backend_factory or OpenCVBackend
         )
         self._backend: VideoBackend | None = None
@@ -253,7 +249,7 @@ class VideoReader:
         需要处理：
         - 时间裁剪（start_time_s / end_time_s）
         - fps 下采样（target_fps）
-        - 分辨率缩放（target_width_px / target_height_px）
+        - 分辨率缩放（target_width_px / target_height_px，缺失维度沿用原始尺寸）
         """
         ...
 
@@ -296,29 +292,25 @@ def iter_decoded_frames(
 ### 0.4 内部流程（伪代码）
 
 ```python
-import cv2
-
 def frames(self) -> Iterator[DecodedFrame]:
     cfg = self._config
-    cap = self._cap
+    backend = self._backend
+    metadata = self._metadata
 
-    raw_fps = cap.get(cv2.CAP_PROP_FPS)
-    if raw_fps <= 0:
-        raise VideoIOError("Invalid FPS from video")
-
-    time_per_frame_s = 1.0 / raw_fps
-
-    frame_idx_raw = 0
-    frame_idx_out = 0
+    time_per_frame_s = 1.0 / metadata.fps
+    next_raw_idx = 0
+    next_out_idx = 0
     last_output_time_s: float | None = None
 
     while True:
-        ok, img_bgr = cap.read()
+        ok, img_bgr = backend.read()
         if not ok:
             break
+        if img_bgr is None:
+            raise VideoIOError("Backend returned empty frame when ok=True")
 
-        timestamp_s = frame_idx_raw * time_per_frame_s
-        frame_idx_raw += 1
+        timestamp_s = next_raw_idx * time_per_frame_s
+        next_raw_idx += 1
 
         if cfg.start_time_s is not None and timestamp_s < cfg.start_time_s:
             continue
@@ -326,29 +318,31 @@ def frames(self) -> Iterator[DecodedFrame]:
             break
 
         # fps 下采样
-        if cfg.target_fps is not None:
-            if last_output_time_s is not None:
-                if timestamp_s - last_output_time_s < 1.0 / cfg.target_fps:
-                    continue
+        if cfg.target_fps is not None and last_output_time_s is not None:
+            if timestamp_s - last_output_time_s < 1.0 / cfg.target_fps:
+                continue
 
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-        # 分辨率缩放
-        if cfg.target_width_px and cfg.target_height_px:
+        # 分辨率缩放：缺失维度沿用原始尺寸
+        if cfg.target_width_px or cfg.target_height_px:
             img_rgb = cv2.resize(
                 img_rgb,
-                (cfg.target_width_px, cfg.target_height_px),
+                (
+                    cfg.target_width_px or metadata.width_px,
+                    cfg.target_height_px or metadata.height_px,
+                ),
                 interpolation=cv2.INTER_AREA,
             )
 
         last_output_time_s = timestamp_s
 
         yield DecodedFrame(
-            frame_index=frame_idx_out,
+            frame_index=next_out_idx,
             timestamp_s=timestamp_s,
             image=img_rgb,
         )
-        frame_idx_out += 1
+        next_out_idx += 1
 ```
 
 ### 0.5 错误处理与日志

@@ -79,10 +79,13 @@ class _FrameIterator:
                 continue
 
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            if cfg.target_width_px and cfg.target_height_px:
+            if cfg.target_width_px or cfg.target_height_px:
                 frame_rgb = cv2.resize(
                     frame_rgb,
-                    (cfg.target_width_px, cfg.target_height_px),
+                    (
+                        cfg.target_width_px or self._metadata.width_px,
+                        cfg.target_height_px or self._metadata.height_px,
+                    ),
                     interpolation=cv2.INTER_AREA,
                 )
 

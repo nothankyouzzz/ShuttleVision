@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, Tuple
-
 import cv2
 
 from .types import Array3U8, VideoIOError, VideoMetadata
@@ -19,7 +17,7 @@ class VideoBackend(ABC):
     def open(self) -> VideoMetadata: ...
 
     @abstractmethod
-    def read(self) -> Tuple[bool, Array3U8 | None]: ...
+    def read(self) -> tuple[bool, Array3U8 | None]: ...
 
     @abstractmethod
     def close(self) -> None: ...
@@ -30,8 +28,8 @@ class OpenCVBackend(VideoBackend):
 
     def __init__(self, path: str):
         super().__init__(path)
-        self._cap: Optional[cv2.VideoCapture] = None
-        self._metadata: Optional[VideoMetadata] = None
+        self._cap: cv2.VideoCapture | None = None
+        self._metadata: VideoMetadata | None = None
 
     def open(self) -> VideoMetadata:
         if self._cap is not None:
@@ -74,7 +72,7 @@ class OpenCVBackend(VideoBackend):
         self._cap = cap
         return self._metadata
 
-    def read(self) -> Tuple[bool, Array3U8 | None]:
+    def read(self) -> tuple[bool, Array3U8 | None]:
         if self._cap is None:
             raise VideoIOError("Backend not opened")
         ok, frame_bgr = self._cap.read()

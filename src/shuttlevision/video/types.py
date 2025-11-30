@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from os import PathLike
 
 import numpy as np
 from jaxtyping import UInt8
