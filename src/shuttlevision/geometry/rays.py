@@ -70,7 +70,6 @@ def pixel_to_world_ray(
 ) -> Ray3D:
     """Convenience wrapper combining pixel_to_camera_ray and camera_to_world_ray."""
     camera = camera_model or CameraModel(pose)
-    ray_cam = camera.pixel_to_camera_ray(u_px, v_px)
     direction_world = camera.pixel_to_world_direction(u_px, v_px)
     return Ray3D(origin_m=camera.camera_center_m, direction=direction_world)
 
