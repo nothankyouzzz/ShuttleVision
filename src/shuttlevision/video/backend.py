@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
+
 import cv2
 
 from .types import Array3U8, VideoIOError, VideoMetadata
