@@ -3,11 +3,12 @@ name = "shuttlevision"
 version = "0.1.0"
 description = "Monocular Badminton 3D Flight Reconstruction & Analysis System"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "jaxtyping>=0.3.3",
     "numpy>=2.2.6",
     "opencv-python>=4.12.0.88",
+    "ultralytics>=8.3.233",
 ]
 
 # here we disabled forward-annotation-syntax-error (F722) because
